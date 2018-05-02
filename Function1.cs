@@ -23,22 +23,22 @@ namespace FunctionApp8
         {
             var words = new List<List<string>>();
 
-            List<CloudBlob> textFileNames = await context.CallActivityAsync<List<CloudBlob>>("ListFiles", "outputs");
+            IEnumerable<string> textFileNames = await context.CallActivityAsync<IEnumerable<string>>("ListFiles", "out-container");
 
             List<Task<string>> tasks = new List<Task<string>>();
-            foreach (var blobItem in textFileNames)
+            foreach (var filename in textFileNames)
             {
-                tasks.Add(context.CallActivityAsync<string>("RetrieveContent", blobItem));
+                tasks.Add(context.CallActivityAsync<string>("RetrieveContent", filename));
             }
 
-            await Task.WhenAll(tasks);
+            var completedTasks = await Task.WhenAll(tasks);
 
-            var result = await context.CallActivityAsync<IEnumerable<string>>("CalculateMostUsed", tasks.ToArray());
+            var result = await context.CallActivityAsync<IEnumerable<string>>("CalculateMostUsed", completedTasks);
             return result;
         }
 
         [FunctionName("ListFiles")]
-        public static async Task<List<CloudBlob>> ListFiles([ActivityTrigger] string containerName, TraceWriter log)
+        public static async Task<IEnumerable<string>> ListFiles([ActivityTrigger] string containerName, TraceWriter log)
         {
             var container = blobClient.GetContainerReference(containerName);
             BlobContinuationToken continuationToken = null;
@@ -51,15 +51,25 @@ namespace FunctionApp8
             }
             while (continuationToken != null);
 
-            return results;
+            return from t in results select t.Name;
         }
 
         [FunctionName("RetrieveContent")]
-        public static async Task<string> RetrieveContent([ActivityTrigger] CloudBlob blobItem, TraceWriter log)
+        public static async Task<string> RetrieveContent([ActivityTrigger] string filename, TraceWriter log)
         {
-            Stream blobStream = new MemoryStream();
-            await blobItem.DownloadToStreamAsync(blobStream);
-            return await (new StreamReader(blobStream).ReadLineAsync());
+            var container = blobClient.GetContainerReference("out-container");
+            using (Stream blobStream = new MemoryStream())
+            {
+                var blobItem = container.GetBlockBlobReference(filename);
+                await blobItem.DownloadToStreamAsync(blobStream);
+                blobStream.Position = 0;
+                using (StreamReader sr = new StreamReader(blobStream))
+                {
+                    string content = await sr.ReadToEndAsync();
+                    return content;
+                }
+            }
+
         }
 
         [FunctionName("CalculateMostUsed")]
