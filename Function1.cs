@@ -3,12 +3,14 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
+using System.Text;
 using System.Threading.Tasks;
 using Microsoft.Azure.WebJobs;
 using Microsoft.Azure.WebJobs.Extensions.Http;
 using Microsoft.Azure.WebJobs.Host;
 using Microsoft.WindowsAzure.Storage;
 using Microsoft.WindowsAzure.Storage.Blob;
+using Newtonsoft.Json;
 
 namespace FunctionApp8
 {
@@ -18,11 +20,8 @@ namespace FunctionApp8
         private static CloudBlobClient blobClient = storageAccount.CreateCloudBlobClient();
 
         [FunctionName("Orchestrator")]
-        public static async Task<IEnumerable<string>> RunOrchestrator(
-            [OrchestrationTrigger] DurableOrchestrationContext context)
+        public static async Task<WordPairs> RunOrchestrator([OrchestrationTrigger] DurableOrchestrationContext context)
         {
-            var words = new List<List<string>>();
-
             IEnumerable<string> textFileNames = await context.CallActivityAsync<IEnumerable<string>>("ListFiles", "out-container");
 
             List<Task<string>> tasks = new List<Task<string>>();
@@ -33,7 +32,9 @@ namespace FunctionApp8
 
             var completedTasks = await Task.WhenAll(tasks);
 
-            var result = await context.CallActivityAsync<IEnumerable<string>>("CalculateMostUsed", completedTasks);
+            var result = CalculateMostUsed(completedTasks);
+            await context.CallActivityAsync("WriteToBlob", result);
+
             return result;
         }
 
@@ -69,11 +70,19 @@ namespace FunctionApp8
                     return content;
                 }
             }
-
         }
 
-        [FunctionName("CalculateMostUsed")]
-        public static IEnumerable<string> CalculateMostUsed([ActivityTrigger] string[] stickers, TraceWriter log)
+        [FunctionName("WriteToBlob")]
+        public static async Task WriteToBlobAsJson(
+            [ActivityTrigger] DurableActivityContext content,
+            [Blob("most-used-words/{rand-guid}.txt", FileAccess.Write, Connection = "OutputStorage")] Stream outBlob,
+            TraceWriter log)
+        {
+            var bytes = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(content.GetInput<WordPairs>()).ToString());
+            await outBlob.WriteAsync(bytes, 0, bytes.Length);
+        }
+
+        public static WordPairs CalculateMostUsed([ActivityTrigger] string[] stickers)
         {
             Dictionary<string, int> counts = new Dictionary<string, int>();
             foreach (var sticker in stickers)
@@ -82,18 +91,23 @@ namespace FunctionApp8
                 foreach (var word in words)
                 {
                     int count;
-                    if(counts.TryGetValue(word, out count))
+                    if (counts.TryGetValue(word, out count))
                     {
-                        counts[word] = count++;
-                    } else
+                        counts[word] = ++count;
+                    }
+                    else
                     {
                         counts[word] = 1;
                     }
                 }
             }
 
-            var sortedDict = from w in counts orderby w.Value descending select w.Key;
-            return sortedDict.Take(5);
+            var sortedWords = from w
+                             in counts
+                              where !string.IsNullOrWhiteSpace(w.Key)
+                              orderby w.Value
+                              descending select new WordPair { Word = w.Key, Count = w.Value.ToString() };
+            return new WordPairs { Words = sortedWords.Take(10) };
         }
 
         [FunctionName("Http_StartMapReduce")]
@@ -108,6 +122,20 @@ namespace FunctionApp8
             log.Info($"Started orchestration with ID = '{instanceId}'.");
 
             return starter.CreateCheckStatusResponse(req, instanceId);
+        }
+
+        public class WordPair
+        {
+            [JsonProperty("word")]
+            public string Word { get; set; }
+            [JsonProperty("count")]
+            public string Count { get; set; }
+        }
+
+        public class WordPairs
+        {
+            [JsonProperty("words")]
+            public IEnumerable<WordPair> Words;
         }
     }
 }
